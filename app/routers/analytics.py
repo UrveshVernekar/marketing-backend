@@ -337,3 +337,114 @@ async def get_sku_standings(
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/mop-trends")
+async def get_mop_trends(
+    state: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    duration: str = Query("all")
+):
+    try:
+        with engine.connect() as conn:
+            max_period_res = conn.execute(text("SELECT MAX(year * 12 + month) FROM marketing_data")).scalar()
+            
+            query_str = """
+                SELECT brand, capacity, year, month, AVG(price) as avg_price
+                FROM marketing_data
+                WHERE price IS NOT NULL AND price > 0 AND capacity IS NOT NULL
+            """
+            params = {}
+            
+            if state:
+                query_str += " AND UPPER(state) = :state"
+                params["state"] = state.upper()
+            if city:
+                query_str += " AND UPPER(city) = :city"
+                params["city"] = city.upper()
+                
+            if duration != "all" and max_period_res is not None:
+                months_back = 3
+                if duration == "6m":
+                    months_back = 6
+                elif duration == "12m":
+                    months_back = 12
+                
+                min_period = max_period_res - months_back + 1
+                query_str += " AND (year * 12 + month) >= :min_period"
+                params["min_period"] = min_period
+                
+            query_str += " GROUP BY brand, capacity, year, month"
+            
+            result = conn.execute(text(query_str), params).fetchall()
+            
+            capacity_buckets = ["6 kg", "7 kg", "8 kg", "9 kg", "10 kg", "11 kg", "12 kg", "13 kg", "14 kg", "> 14 kg"]
+            
+            # 1. Aggregate for overall table
+            table_data = {c: {} for c in capacity_buckets}
+            
+            # 2. Aggregate for trend
+            periods_data = {}
+            
+            for row in result:
+                brand = row.brand or "Unknown"
+                bucket = get_capacity_bucket(row.capacity)
+                if not bucket:
+                    continue
+                price = float(row.avg_price or 0.0)
+                y = int(row.year)
+                m = int(row.month)
+                
+                if brand not in table_data[bucket]:
+                    table_data[bucket][brand] = []
+                table_data[bucket][brand].append(price)
+                
+                period_key = y * 12 + m
+                if period_key not in periods_data:
+                    months_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    period_label = f"{months_abbr[m-1]}-{str(y)[-2:]}"
+                    periods_data[period_key] = {
+                        "period_key": period_key,
+                        "period_label": period_label,
+                        "year": y,
+                        "month": m,
+                        "capacity_trends": {c: {} for c in capacity_buckets}
+                    }
+                
+                periods_data[period_key]["capacity_trends"][bucket][brand] = round(price, 2)
+                
+            # Compute averages and rankings
+            table_output = []
+            for bucket in capacity_buckets:
+                brand_mops = []
+                for brand, prices in table_data[bucket].items():
+                    avg_mop = sum(prices) / len(prices) if prices else 0.0
+                    brand_mops.append((brand, round(avg_mop, 2)))
+                    
+                brand_mops.sort(key=lambda x: x[1], reverse=True)
+                
+                for index, (brand, mop) in enumerate(brand_mops):
+                    table_output.append({
+                        "brand": brand,
+                        "capacity": bucket,
+                        "mop": mop,
+                        "rank": index + 1
+                    })
+                    
+            # Sort chronological trend
+            sorted_periods = sorted(periods_data.values(), key=lambda x: x["period_key"])
+            trend_output = []
+            for period in sorted_periods:
+                trend_output.append({
+                    "period": period["period_label"],
+                    "year": period["year"],
+                    "month": period["month"],
+                    "capacity_trends": period["capacity_trends"]
+                })
+                
+            return {
+                "table": table_output,
+                "trend": trend_output
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
