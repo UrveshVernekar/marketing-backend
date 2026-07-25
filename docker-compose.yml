@@ -29,7 +29,7 @@ services:
     dns:
       - 8.8.8.8
     environment:
-      - DATABASE_URL=postgresql://postgres_user:postgres_password@db:5435/marketing_db
+      - DATABASE_URL=postgresql://postgres_user:postgres_password@db:5432/marketing_db
     depends_on:
       - db
 
