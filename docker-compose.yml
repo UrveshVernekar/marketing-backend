@@ -21,7 +21,7 @@ services:
     container_name: marketing_fastapi_web
     restart: always
     # This matches the uvicorn string you ran earlier
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - .:/app
     ports:
