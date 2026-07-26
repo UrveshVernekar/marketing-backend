@@ -116,6 +116,8 @@ async def get_branch_market_share(
                 query_str += " AND UPPER(loading) = 'FRONTLOADING'"
             elif category == "TL":
                 query_str += " AND UPPER(loading) = 'TOPLOADING'"
+            elif category == "WDR":
+                query_str += " AND UPPER(loading) = 'WDR'"
                 
             query_str += " GROUP BY state, brand ORDER BY state"
             
