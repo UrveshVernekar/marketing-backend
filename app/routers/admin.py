@@ -1,4 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Query
+from fastapi.responses import StreamingResponse
+from typing import Optional
 import pandas as pd
 import numpy as np
 import io
@@ -534,11 +536,446 @@ def process_marketing_upload_task(task_id: str, content: bytes, filename: str):
         }
 
 
+WHITELIST_COLS = {
+    "sp_cell", "city", "state", "brand", "item", "drying_function",
+    "loading", "capacity", "steam_funct_int", "sales_units", "price",
+    "motor_type", "steam_function", "period", "sales_value"
+}
+
+month_abbr_map = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+}
+
+def build_numeric_filter(col_name: str, filter_str: str, params: dict, param_counter: list) -> str:
+    conditions = [c.strip() for c in filter_str.split(",") if c.strip()]
+    clauses = []
+    for cond in conditions:
+        param_name = f"{col_name.replace('(', '').replace(')', '').replace('*', '').replace(' ', '')}_filter_{param_counter[0]}"
+        param_counter[0] += 1
+        
+        if cond.startswith(">="):
+            try:
+                params[param_name] = float(cond[2:].strip())
+                clauses.append(f"{col_name} >= :{param_name}")
+            except ValueError:
+                pass
+        elif cond.startswith("<="):
+            try:
+                params[param_name] = float(cond[2:].strip())
+                clauses.append(f"{col_name} <= :{param_name}")
+            except ValueError:
+                pass
+        elif cond.startswith("!="):
+            try:
+                params[param_name] = float(cond[2:].strip())
+                clauses.append(f"{col_name} != :{param_name}")
+            except ValueError:
+                pass
+        elif cond.startswith(">"):
+            try:
+                params[param_name] = float(cond[1:].strip())
+                clauses.append(f"{col_name} > :{param_name}")
+            except ValueError:
+                pass
+        elif cond.startswith("<"):
+            try:
+                params[param_name] = float(cond[1:].strip())
+                clauses.append(f"{col_name} < :{param_name}")
+            except ValueError:
+                pass
+        elif cond.startswith("="):
+            try:
+                params[param_name] = float(cond[1:].strip())
+                clauses.append(f"{col_name} = :{param_name}")
+            except ValueError:
+                pass
+        elif ".." in cond:
+            parts = cond.split("..")
+            if len(parts) == 2:
+                try:
+                    p_min = float(parts[0].strip())
+                    p_max = float(parts[1].strip())
+                    p_name_min = f"{param_name}_min"
+                    p_name_max = f"{param_name}_max"
+                    params[p_name_min] = p_min
+                    params[p_name_max] = p_max
+                    clauses.append(f"{col_name} BETWEEN :{p_name_min} AND :{p_name_max}")
+                except ValueError:
+                    pass
+        elif "-" in cond:
+            parts = cond.split("-")
+            if len(parts) == 2:
+                try:
+                    p_min = float(parts[0].strip())
+                    p_max = float(parts[1].strip())
+                    p_name_min = f"{param_name}_min"
+                    p_name_max = f"{param_name}_max"
+                    params[p_name_min] = p_min
+                    params[p_name_max] = p_max
+                    clauses.append(f"{col_name} BETWEEN :{p_name_min} AND :{p_name_max}")
+                except ValueError:
+                    pass
+        else:
+            try:
+                params[param_name] = float(cond)
+                clauses.append(f"{col_name} = :{param_name}")
+            except ValueError:
+                params[param_name] = f"%{cond}%"
+                clauses.append(f"CAST({col_name} AS TEXT) LIKE :{param_name}")
+    if clauses:
+        return " AND ".join(clauses)
+    return ""
+
+def parse_period_filter(val: str, params: dict, param_counter: list) -> str:
+    val = val.lower().strip()
+    clauses = []
+    if "-" in val:
+        parts = val.split("-")
+        if len(parts) == 2:
+            m_str, y_str = parts[0].strip(), parts[1].strip()
+            m_val = month_abbr_map.get(m_str[:3])
+            if m_val:
+                p_m = f"period_m_{param_counter[0]}"
+                params[p_m] = m_val
+                clauses.append(f"month = :{p_m}")
+            try:
+                y_val = int(y_str)
+                if y_val < 100:
+                    y_val += 2000
+                p_y = f"period_y_{param_counter[0]}"
+                params[p_y] = y_val
+                clauses.append(f"year = :{p_y}")
+            except ValueError:
+                pass
+    else:
+        m_val = month_abbr_map.get(val[:3])
+        if m_val:
+            p_m = f"period_m_{param_counter[0]}"
+            params[p_m] = m_val
+            clauses.append(f"month = :{p_m}")
+        else:
+            try:
+                y_val = int(val)
+                p_y = f"period_y_{param_counter[0]}"
+                if y_val < 100:
+                    y_val_4d = 2000 + y_val
+                    params[p_y] = y_val_4d
+                    clauses.append(f"(year = :{p_y} OR (year % 100) = {y_val})")
+                else:
+                    params[p_y] = y_val
+                    clauses.append(f"year = :{p_y}")
+            except ValueError:
+                p_y_text = f"period_y_text_{param_counter[0]}"
+                params[p_y_text] = f"%{val}%"
+                clauses.append(f"CAST(year AS TEXT) LIKE :{p_y_text}")
+    param_counter[0] += 1
+    if clauses:
+        return " AND ".join(clauses)
+    return ""
+
+def build_where_clause(search: str, filters: dict, params: dict) -> str:
+    clauses = []
+    param_counter = [0]
+    
+    if search:
+        search_terms = search.lower().strip().split()
+        for term in search_terms:
+            p_search = f"search_term_{param_counter[0]}"
+            param_counter[0] += 1
+            params[p_search] = f"%{term}%"
+            clauses.append(f"""
+                (LOWER(sp_cell) LIKE :{p_search} OR
+                 LOWER(brand) LIKE :{p_search} OR
+                 LOWER(item) LIKE :{p_search} OR
+                 LOWER(state) LIKE :{p_search} OR
+                 LOWER(city) LIKE :{p_search})
+            """)
+            
+    for col, filter_val in filters.items():
+        if not filter_val:
+            continue
+            
+        if col in ["sales_units", "price", "capacity"]:
+            numeric_clause = build_numeric_filter(col, filter_val, params, param_counter)
+            if numeric_clause:
+                clauses.append(f"({numeric_clause})")
+        elif col == "sales_value":
+            numeric_clause = build_numeric_filter("(price * sales_units)", filter_val, params, param_counter)
+            if numeric_clause:
+                clauses.append(f"({numeric_clause})")
+        elif col == "period":
+            period_clause = parse_period_filter(filter_val, params, param_counter)
+            if period_clause:
+                clauses.append(f"({period_clause})")
+        elif col in WHITELIST_COLS:
+            p_col = f"col_filter_{col}_{param_counter[0]}"
+            param_counter[0] += 1
+            params[p_col] = f"%{filter_val.lower().strip()}%"
+            clauses.append(f"LOWER({col}) LIKE :{p_col}")
+            
+    if clauses:
+        return " AND ".join(clauses)
+    return "1=1"
+
 @router.get("/marketing-data")
-async def get_marketing_data():
+async def get_marketing_data(
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1),
+    search: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query(None),
+    sp_cell: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    item: Optional[str] = Query(None),
+    period: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    sales_units: Optional[str] = Query(None),
+    sales_value: Optional[str] = Query(None),
+    price: Optional[str] = Query(None),
+    capacity: Optional[str] = Query(None),
+    motor_type: Optional[str] = Query(None),
+    steam_function: Optional[str] = Query(None)
+):
     try:
+        filters = {
+            "sp_cell": sp_cell,
+            "brand": brand,
+            "item": item,
+            "period": period,
+            "state": state,
+            "city": city,
+            "sales_units": sales_units,
+            "sales_value": sales_value,
+            "price": price,
+            "capacity": capacity,
+            "motor_type": motor_type,
+            "steam_function": steam_function
+        }
+        filters = {k: v for k, v in filters.items() if v is not None}
+        
+        params = {}
+        where_clause = build_where_clause(search, filters, params)
+        
+        order_clause = "year DESC, month DESC, sp_cell"
+        if sort_by and sort_by in WHITELIST_COLS:
+            direction = "DESC" if sort_order == "desc" else "ASC"
+            if sort_by == "period":
+                order_clause = f"year {direction}, month {direction}"
+            elif sort_by == "sales_value":
+                order_clause = f"(price * sales_units) {direction}"
+            else:
+                order_clause = f"{sort_by} {direction}"
+                
+        offset = (page - 1) * limit
+        params["limit"] = limit
+        params["offset"] = offset
+        
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT *, (price * sales_units) AS sales_value FROM marketing_data ORDER BY year DESC, month DESC, sp_cell")).fetchall()
-            return [dict(r._mapping) for r in result]
+            count_query = text(f"SELECT COUNT(*) FROM marketing_data WHERE {where_clause}")
+            total_count = conn.execute(count_query, params).scalar()
+            
+            data_query = text(f"""
+                SELECT *, (price * sales_units) AS sales_value 
+                FROM marketing_data 
+                WHERE {where_clause} 
+                ORDER BY {order_clause} 
+                LIMIT :limit OFFSET :offset
+            """)
+            result = conn.execute(data_query, params).fetchall()
+            items = [dict(r._mapping) for r in result]
+            
+            return {
+                "items": items,
+                "total_count": total_count
+            }
+            
     except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/marketing-kpis")
+async def get_marketing_kpis(
+    search: Optional[str] = Query(None),
+    sp_cell: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    item: Optional[str] = Query(None),
+    period: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    sales_units: Optional[str] = Query(None),
+    sales_value: Optional[str] = Query(None),
+    price: Optional[str] = Query(None),
+    capacity: Optional[str] = Query(None),
+    motor_type: Optional[str] = Query(None),
+    steam_function: Optional[str] = Query(None)
+):
+    try:
+        filters = {
+            "sp_cell": sp_cell,
+            "brand": brand,
+            "item": item,
+            "period": period,
+            "state": state,
+            "city": city,
+            "sales_units": sales_units,
+            "sales_value": sales_value,
+            "price": price,
+            "capacity": capacity,
+            "motor_type": motor_type,
+            "steam_function": steam_function
+        }
+        filters = {k: v for k, v in filters.items() if v is not None}
+        
+        params = {}
+        where_clause = build_where_clause(search, filters, params)
+        
+        with engine.connect() as conn:
+            kpi_query = text(f"""
+                SELECT 
+                    COALESCE(SUM(sales_units), 0) AS total_sales_units,
+                    COALESCE(SUM(price * sales_units), 0) AS total_revenue,
+                    COUNT(DISTINCT brand) AS total_brands
+                FROM marketing_data
+                WHERE {where_clause}
+            """)
+            row = conn.execute(kpi_query, params).fetchone()
+            
+            total_sales_units = row.total_sales_units
+            total_revenue = row.total_revenue
+            total_brands = row.total_brands
+            
+            avg_price = total_revenue / total_sales_units if total_sales_units > 0 else 0
+            
+            return {
+                "total_sales_units": total_sales_units,
+                "total_revenue": total_revenue,
+                "avg_price": avg_price,
+                "total_brands": total_brands
+            }
+            
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/marketing-data/export")
+async def export_marketing_data(
+    search: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None),
+    sort_order: Optional[str] = Query(None),
+    sp_cell: Optional[str] = Query(None),
+    brand: Optional[str] = Query(None),
+    item: Optional[str] = Query(None),
+    period: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    city: Optional[str] = Query(None),
+    sales_units: Optional[str] = Query(None),
+    sales_value: Optional[str] = Query(None),
+    price: Optional[str] = Query(None),
+    capacity: Optional[str] = Query(None),
+    motor_type: Optional[str] = Query(None),
+    steam_function: Optional[str] = Query(None)
+):
+    try:
+        filters = {
+            "sp_cell": sp_cell,
+            "brand": brand,
+            "item": item,
+            "period": period,
+            "state": state,
+            "city": city,
+            "sales_units": sales_units,
+            "sales_value": sales_value,
+            "price": price,
+            "capacity": capacity,
+            "motor_type": motor_type,
+            "steam_function": steam_function
+        }
+        filters = {k: v for k, v in filters.items() if v is not None}
+        
+        params = {}
+        where_clause = build_where_clause(search, filters, params)
+        
+        order_clause = "year DESC, month DESC, sp_cell"
+        if sort_by and sort_by in WHITELIST_COLS:
+            direction = "DESC" if sort_order == "desc" else "ASC"
+            if sort_by == "period":
+                order_clause = f"year {direction}, month {direction}"
+            elif sort_by == "sales_value":
+                order_clause = f"(price * sales_units) {direction}"
+            else:
+                order_clause = f"{sort_by} {direction}"
+                
+        def get_month_name(m):
+            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            if 1 <= m <= 12:
+                return months[m - 1]
+            return ""
+
+        def csv_generator():
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow([
+                "Channel", "Brand", "Item Model", "Period", "State", "City", 
+                "Sales Units", "Sales Value (INR)", "Unit Price (INR)", 
+                "Capacity", "Motor Type", "Steam Function"
+            ])
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+            
+            batch_size = 10000
+            offset = 0
+            
+            while True:
+                batch_params = params.copy()
+                batch_params["limit"] = batch_size
+                batch_params["offset"] = offset
+                
+                with engine.connect() as conn:
+                    query = text(f"""
+                        SELECT *, (price * sales_units) AS sales_value
+                        FROM marketing_data
+                        WHERE {where_clause}
+                        ORDER BY {order_clause}
+                        LIMIT :limit OFFSET :offset
+                    """)
+                    rows = conn.execute(query, batch_params).fetchall()
+                    
+                if not rows:
+                    break
+                    
+                output = io.StringIO()
+                writer = csv.writer(output)
+                for r in rows:
+                    p_str = f"{get_month_name(r.month)}-{r.year}"
+                    writer.writerow([
+                        r.sp_cell,
+                        r.brand or "",
+                        r.item or "",
+                        p_str,
+                        r.state or "",
+                        r.city or "",
+                        r.sales_units,
+                        r.sales_value,
+                        r.price,
+                        f"{r.capacity} kg" if r.capacity else "",
+                        r.motor_type or "",
+                        r.steam_function or ""
+                    ])
+                yield output.getvalue()
+                output.seek(0)
+                output.truncate(0)
+                
+                offset += batch_size
+                
+        return StreamingResponse(
+            csv_generator(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=marketing-data-export.csv"}
+        )
+        
+    except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
