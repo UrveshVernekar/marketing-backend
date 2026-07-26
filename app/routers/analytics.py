@@ -8,6 +8,10 @@ router = APIRouter(
     tags=["analytics"]
 )
 
+def get_month_name(m: int) -> str:
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return months[m - 1] if 1 <= m <= 12 else ""
+
 def get_capacity_bucket(cap_val):
     if cap_val is None:
         return None
@@ -78,7 +82,9 @@ async def get_branch_market_share(
             # Duration filter
             if duration != "all" and max_period_res is not None:
                 months_back = 3
-                if duration == "6m":
+                if duration == "1m":
+                    months_back = 1
+                elif duration == "6m":
                     months_back = 6
                 elif duration == "12m":
                     months_back = 12
@@ -132,7 +138,9 @@ async def get_capacity_market_share(
     states: Optional[str] = Query(None),
     cities: Optional[str] = Query(None),
     brands: Optional[str] = Query(None),
-    duration: str = Query("all")
+    duration: str = Query("all"),
+    start_period: Optional[str] = Query(None),
+    end_period: Optional[str] = Query(None)
 ):
     try:
         with engine.connect() as conn:
@@ -169,9 +177,11 @@ async def get_capacity_market_share(
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
                 
-            if duration != "all" and max_period_res is not None:
+            if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
-                if duration == "6m":
+                if duration == "1m":
+                    months_back = 1
+                elif duration == "6m":
                     months_back = 6
                 elif duration == "12m":
                     months_back = 12
@@ -179,6 +189,21 @@ async def get_capacity_market_share(
                 min_period = max_period_res - months_back + 1
                 query_str += " AND (year * 12 + month) >= :min_period"
                 params["min_period"] = min_period
+                
+            if start_period:
+                try:
+                    sy, sm = map(int, start_period.split("-"))
+                    query_str += " AND (year * 12 + month) >= :start_period_val"
+                    params["start_period_val"] = sy * 12 + sm
+                except ValueError:
+                    pass
+            if end_period:
+                try:
+                    ey, em = map(int, end_period.split("-"))
+                    query_str += " AND (year * 12 + month) <= :end_period_val"
+                    params["end_period_val"] = ey * 12 + em
+                except ValueError:
+                    pass
                 
             query_str += " GROUP BY state, city, year, month, brand, capacity"
             
@@ -212,8 +237,7 @@ async def get_capacity_market_share(
                 # Trend aggregation
                 period_key = y * 12 + m
                 if period_key not in periods_data:
-                    months_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                    period_label = f"{months_abbr[m-1]}-{str(y)[-2:]}"
+                    period_label = f"{get_month_name(m)}-{str(y)[-2:]}"
                     periods_data[period_key] = {
                         "period_key": period_key,
                         "period_label": period_label,
@@ -278,6 +302,18 @@ async def get_capacity_market_share(
             unique_brands_res = conn.execute(text("SELECT DISTINCT brand FROM marketing_data")).fetchall()
             brands_list = sorted(list(set(r.brand for r in unique_brands_res if r.brand)))
 
+            # Fetch distinct periods
+            distinct_periods_res = conn.execute(text("SELECT DISTINCT year, month FROM marketing_data ORDER BY year DESC, month DESC")).fetchall()
+            periods_list = []
+            for r in distinct_periods_res:
+                m_label = get_month_name(r.month)
+                periods_list.append({
+                    "year": r.year,
+                    "month": r.month,
+                    "label": f"{m_label} {r.year}",
+                    "value": f"{r.year}-{r.month:02d}"
+                })
+
             return {
                 "grid": grid_output,
                 "capacity_totals": capacity_totals,
@@ -285,7 +321,8 @@ async def get_capacity_market_share(
                 "states": states,
                 "cities": cities,
                 "state_city_map": state_city_map,
-                "brands": brands_list
+                "brands": brands_list,
+                "periods": periods_list
             }
             
     except Exception as e:
@@ -297,7 +334,9 @@ async def get_sku_standings(
     cities: Optional[str] = Query(None),
     brands: Optional[str] = Query(None),
     duration: str = Query("all"),
-    sku_type: str = Query("item", description="SKU type: item or capacity")
+    sku_type: str = Query("item", description="SKU type: item or capacity"),
+    start_period: Optional[str] = Query(None),
+    end_period: Optional[str] = Query(None)
 ):
     try:
         with engine.connect() as conn:
@@ -343,9 +382,11 @@ async def get_sku_standings(
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
                 
-            if duration != "all" and max_period_res is not None:
+            if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
-                if duration == "6m":
+                if duration == "1m":
+                    months_back = 1
+                elif duration == "6m":
                     months_back = 6
                 elif duration == "12m":
                     months_back = 12
@@ -353,6 +394,21 @@ async def get_sku_standings(
                 min_period = max_period_res - months_back + 1
                 query_str += " AND (year * 12 + month) >= :min_period"
                 params["min_period"] = min_period
+                
+            if start_period:
+                try:
+                    sy, sm = map(int, start_period.split("-"))
+                    query_str += " AND (year * 12 + month) >= :start_period_val"
+                    params["start_period_val"] = sy * 12 + sm
+                except ValueError:
+                    pass
+            if end_period:
+                try:
+                    ey, em = map(int, end_period.split("-"))
+                    query_str += " AND (year * 12 + month) <= :end_period_val"
+                    params["end_period_val"] = ey * 12 + em
+                except ValueError:
+                    pass
                 
             if sku_type == "capacity":
                 query_str += " GROUP BY brand, capacity"
@@ -413,7 +469,9 @@ async def get_mop_trends(
     states: Optional[str] = Query(None),
     cities: Optional[str] = Query(None),
     brands: Optional[str] = Query(None),
-    duration: str = Query("all")
+    duration: str = Query("all"),
+    start_period: Optional[str] = Query(None),
+    end_period: Optional[str] = Query(None)
 ):
     try:
         with engine.connect() as conn:
@@ -450,9 +508,11 @@ async def get_mop_trends(
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
                 
-            if duration != "all" and max_period_res is not None:
+            if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
-                if duration == "6m":
+                if duration == "1m":
+                    months_back = 1
+                elif duration == "6m":
                     months_back = 6
                 elif duration == "12m":
                     months_back = 12
@@ -460,6 +520,21 @@ async def get_mop_trends(
                 min_period = max_period_res - months_back + 1
                 query_str += " AND (year * 12 + month) >= :min_period"
                 params["min_period"] = min_period
+                
+            if start_period:
+                try:
+                    sy, sm = map(int, start_period.split("-"))
+                    query_str += " AND (year * 12 + month) >= :start_period_val"
+                    params["start_period_val"] = sy * 12 + sm
+                except ValueError:
+                    pass
+            if end_period:
+                try:
+                    ey, em = map(int, end_period.split("-"))
+                    query_str += " AND (year * 12 + month) <= :end_period_val"
+                    params["end_period_val"] = ey * 12 + em
+                except ValueError:
+                    pass
                 
             query_str += " GROUP BY brand, capacity, year, month"
             
