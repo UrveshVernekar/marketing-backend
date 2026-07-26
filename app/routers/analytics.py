@@ -27,7 +27,10 @@ def get_capacity_bucket(cap_val):
 @router.get("/branch-market-share")
 async def get_branch_market_share(
     category: str = Query("ALL", description="Category: FL, TL, or ALL"),
-    duration: str = Query("all", description="Duration: 3m, 6m, 12m, or all")
+    duration: str = Query("all", description="Duration: 3m, 6m, 12m, or all"),
+    states: Optional[str] = Query(None, description="Comma-separated states"),
+    cities: Optional[str] = Query(None, description="Comma-separated cities"),
+    brands: Optional[str] = Query(None, description="Comma-separated brands")
 ):
     try:
         with engine.connect() as conn:
@@ -41,6 +44,30 @@ async def get_branch_market_share(
                 WHERE 1=1
             """
             params = {}
+            
+            if brands:
+                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
+                if brand_list:
+                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
+                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(brand_list):
+                        params[f"brand_{i}"] = val
+            
+            if states:
+                state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
+                if state_list:
+                    placeholders = [f":state_{i}" for i in range(len(state_list))]
+                    query_str += f" AND UPPER(state) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(state_list):
+                        params[f"state_{i}"] = val
+                        
+            if cities:
+                city_list = [c.strip().upper() for c in cities.split(",") if c.strip()]
+                if city_list:
+                    placeholders = [f":city_{i}" for i in range(len(city_list))]
+                    query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(city_list):
+                        params[f"city_{i}"] = val
             
             # Category filter (FL, TL, ALL)
             if category == "FL":
@@ -102,8 +129,9 @@ async def get_branch_market_share(
 
 @router.get("/capacity-market-share")
 async def get_capacity_market_share(
-    state: Optional[str] = Query(None),
-    city: Optional[str] = Query(None),
+    states: Optional[str] = Query(None),
+    cities: Optional[str] = Query(None),
+    brands: Optional[str] = Query(None),
     duration: str = Query("all")
 ):
     try:
@@ -117,12 +145,29 @@ async def get_capacity_market_share(
             """
             params = {}
             
-            if state:
-                query_str += " AND UPPER(state) = :state"
-                params["state"] = state.upper()
-            if city:
-                query_str += " AND UPPER(city) = :city"
-                params["city"] = city.upper()
+            if brands:
+                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
+                if brand_list:
+                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
+                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(brand_list):
+                        params[f"brand_{i}"] = val
+                        
+            if states:
+                state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
+                if state_list:
+                    placeholders = [f":state_{i}" for i in range(len(state_list))]
+                    query_str += f" AND UPPER(state) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(state_list):
+                        params[f"state_{i}"] = val
+                        
+            if cities:
+                city_list = [c.strip().upper() for c in cities.split(",") if c.strip()]
+                if city_list:
+                    placeholders = [f":city_{i}" for i in range(len(city_list))]
+                    query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(city_list):
+                        params[f"city_{i}"] = val
                 
             if duration != "all" and max_period_res is not None:
                 months_back = 3
@@ -227,13 +272,20 @@ async def get_capacity_market_share(
             unique_states_cities_res = conn.execute(text("SELECT DISTINCT state, city FROM marketing_data")).fetchall()
             states = sorted(list(set(r.state for r in unique_states_cities_res if r.state)))
             cities = sorted(list(set(r.city for r in unique_states_cities_res if r.city)))
+            state_city_map = [{"state": r.state, "city": r.city} for r in unique_states_cities_res if r.state and r.city]
+            
+            # Fetch global brands list
+            unique_brands_res = conn.execute(text("SELECT DISTINCT brand FROM marketing_data")).fetchall()
+            brands_list = sorted(list(set(r.brand for r in unique_brands_res if r.brand)))
 
             return {
                 "grid": grid_output,
                 "capacity_totals": capacity_totals,
                 "trend": trend_output,
                 "states": states,
-                "cities": cities
+                "cities": cities,
+                "state_city_map": state_city_map,
+                "brands": brands_list
             }
             
     except Exception as e:
@@ -241,8 +293,9 @@ async def get_capacity_market_share(
 
 @router.get("/sku-standings")
 async def get_sku_standings(
-    state: Optional[str] = Query(None),
-    city: Optional[str] = Query(None),
+    states: Optional[str] = Query(None),
+    cities: Optional[str] = Query(None),
+    brands: Optional[str] = Query(None),
     duration: str = Query("all"),
     sku_type: str = Query("item", description="SKU type: item or capacity")
 ):
@@ -266,12 +319,29 @@ async def get_sku_standings(
                 """
             params = {}
             
-            if state:
-                query_str += " AND UPPER(state) = :state"
-                params["state"] = state.upper()
-            if city:
-                query_str += " AND UPPER(city) = :city"
-                params["city"] = city.upper()
+            if brands:
+                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
+                if brand_list:
+                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
+                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(brand_list):
+                        params[f"brand_{i}"] = val
+                        
+            if states:
+                state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
+                if state_list:
+                    placeholders = [f":state_{i}" for i in range(len(state_list))]
+                    query_str += f" AND UPPER(state) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(state_list):
+                        params[f"state_{i}"] = val
+                        
+            if cities:
+                city_list = [c.strip().upper() for c in cities.split(",") if c.strip()]
+                if city_list:
+                    placeholders = [f":city_{i}" for i in range(len(city_list))]
+                    query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(city_list):
+                        params[f"city_{i}"] = val
                 
             if duration != "all" and max_period_res is not None:
                 months_back = 3
@@ -340,8 +410,9 @@ async def get_sku_standings(
 
 @router.get("/mop-trends")
 async def get_mop_trends(
-    state: Optional[str] = Query(None),
-    city: Optional[str] = Query(None),
+    states: Optional[str] = Query(None),
+    cities: Optional[str] = Query(None),
+    brands: Optional[str] = Query(None),
     duration: str = Query("all")
 ):
     try:
@@ -355,12 +426,29 @@ async def get_mop_trends(
             """
             params = {}
             
-            if state:
-                query_str += " AND UPPER(state) = :state"
-                params["state"] = state.upper()
-            if city:
-                query_str += " AND UPPER(city) = :city"
-                params["city"] = city.upper()
+            if brands:
+                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
+                if brand_list:
+                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
+                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(brand_list):
+                        params[f"brand_{i}"] = val
+                        
+            if states:
+                state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
+                if state_list:
+                    placeholders = [f":state_{i}" for i in range(len(state_list))]
+                    query_str += f" AND UPPER(state) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(state_list):
+                        params[f"state_{i}"] = val
+                        
+            if cities:
+                city_list = [c.strip().upper() for c in cities.split(",") if c.strip()]
+                if city_list:
+                    placeholders = [f":city_{i}" for i in range(len(city_list))]
+                    query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
+                    for i, val in enumerate(city_list):
+                        params[f"city_{i}"] = val
                 
             if duration != "all" and max_period_res is not None:
                 months_back = 3
