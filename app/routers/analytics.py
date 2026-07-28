@@ -545,14 +545,18 @@ async def get_mop_trends(
     brands: Optional[str] = Query(None),
     duration: str = Query("all"),
     start_period: Optional[str] = Query(None),
-    end_period: Optional[str] = Query(None)
+    end_period: Optional[str] = Query(None),
+    rank_by: str = Query("price", description="Rank by: price, volume, or revenue")
 ):
     try:
         with engine.connect() as conn:
             max_period_res = conn.execute(text("SELECT MAX(year * 12 + month) FROM marketing_data")).scalar()
             
             query_str = """
-                SELECT brand, capacity, year, month, AVG(price) as avg_price
+                SELECT brand, capacity, year, month, 
+                       AVG(price) as avg_price, 
+                       SUM(sales_units) as total_units, 
+                       SUM(sales_units * price) as total_revenue
                 FROM marketing_data
                 WHERE price IS NOT NULL AND price > 0 AND capacity IS NOT NULL
             """
@@ -628,12 +632,20 @@ async def get_mop_trends(
                 if not bucket:
                     continue
                 price = float(row.avg_price or 0.0)
+                units = int(row.total_units or 0)
+                revenue = float(row.total_revenue or 0.0)
                 y = int(row.year)
                 m = int(row.month)
                 
                 if brand not in table_data[bucket]:
-                    table_data[bucket][brand] = []
-                table_data[bucket][brand].append(price)
+                    table_data[bucket][brand] = {
+                        "prices": [],
+                        "volumes": [],
+                        "revenues": []
+                    }
+                table_data[bucket][brand]["prices"].append(price)
+                table_data[bucket][brand]["volumes"].append(units)
+                table_data[bucket][brand]["revenues"].append(revenue)
                 
                 period_key = y * 12 + m
                 if period_key not in periods_data:
@@ -652,18 +664,33 @@ async def get_mop_trends(
             # Compute averages and rankings
             table_output = []
             for bucket in capacity_buckets:
-                brand_mops = []
-                for brand, prices in table_data[bucket].items():
-                    avg_mop = sum(prices) / len(prices) if prices else 0.0
-                    brand_mops.append((brand, round(avg_mop, 2)))
-                    
-                brand_mops.sort(key=lambda x: x[1], reverse=True)
-                
-                for index, (brand, mop) in enumerate(brand_mops):
-                    table_output.append({
+                brand_stats = []
+                for brand, stats in table_data[bucket].items():
+                    avg_mop = sum(stats["prices"]) / len(stats["prices"]) if stats["prices"] else 0.0
+                    total_vol = sum(stats["volumes"])
+                    total_rev = sum(stats["revenues"])
+                    brand_stats.append({
                         "brand": brand,
+                        "mop": round(avg_mop, 2),
+                        "volume": total_vol,
+                        "revenue": round(total_rev, 2)
+                    })
+                    
+                # Sort according to rank_by parameter
+                if rank_by == "volume":
+                    brand_stats.sort(key=lambda x: x["volume"], reverse=True)
+                elif rank_by == "revenue":
+                    brand_stats.sort(key=lambda x: x["revenue"], reverse=True)
+                else: # "price"
+                    brand_stats.sort(key=lambda x: x["mop"], reverse=True)
+                    
+                for index, stat in enumerate(brand_stats):
+                    table_output.append({
+                        "brand": stat["brand"],
                         "capacity": bucket,
-                        "mop": mop,
+                        "mop": stat["mop"],
+                        "volume": stat["volume"],
+                        "revenue": stat["revenue"],
                         "rank": index + 1
                     })
                     
