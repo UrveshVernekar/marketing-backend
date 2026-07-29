@@ -422,7 +422,8 @@ async def get_sku_standings(
     sku_type: str = Query("item", description="SKU type: item or capacity"),
     start_period: Optional[str] = Query(None),
     end_period: Optional[str] = Query(None),
-    category: str = Query("ALL", description="Category: FL, TL, WDR, or ALL")
+    category: str = Query("ALL", description="Category: FL, TL, WDR, or ALL"),
+    capacities: Optional[str] = Query(None, description="Comma-separated capacity buckets")
 ):
     try:
         with engine.connect() as conn:
@@ -437,7 +438,7 @@ async def get_sku_standings(
                 """
             else:
                 query_str = """
-                    SELECT brand, item as sku_val, SUM(sales_units) as total_units, 
+                    SELECT brand, item as sku_val, MAX(capacity) as capacity, SUM(sales_units) as total_units, 
                            SUM(price * sales_units) as total_revenue
                     FROM marketing_data
                     WHERE item IS NOT NULL AND item != ''
@@ -467,6 +468,25 @@ async def get_sku_standings(
                     query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
+            
+            if capacities:
+                cap_list = [c.strip() for c in capacities.split(",") if c.strip()]
+                cap_clauses = []
+                for idx, cap in enumerate(cap_list):
+                    p_cap = f"cap_filter_{idx}"
+                    if cap == "6 kg":
+                        cap_clauses.append("capacity < 7")
+                    elif cap == "> 14 kg":
+                        cap_clauses.append("capacity > 14")
+                    else:
+                        try:
+                            val = int(cap.split()[0])
+                            params[p_cap] = val
+                            cap_clauses.append(f"(capacity >= :{p_cap} AND capacity < :{p_cap} + 1)")
+                        except ValueError:
+                            pass
+                if cap_clauses:
+                    query_str += f" AND ({' OR '.join(cap_clauses)})"
             
             if category == "FL":
                 query_str += " AND UPPER(loading) = 'FRONTLOADING'"
@@ -542,11 +562,15 @@ async def get_sku_standings(
                         existing["asp"] = round(new_rev / new_vol, 2) if new_vol > 0 else 0.0
                         continue
                         
-                brand_skus[brand].append({
+                item_data = {
                     "sku": sku_name,
                     "volume": volume,
                     "asp": asp
-                })
+                }
+                if sku_type == "item":
+                    cap_val = row.capacity
+                    item_data["capacity"] = f"{float(cap_val):g} kg" if cap_val is not None else None
+                brand_skus[brand].append(item_data)
                 
             # Default sort by volume descending for each brand
             for brand in brand_skus:
