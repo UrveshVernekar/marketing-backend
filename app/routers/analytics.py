@@ -677,7 +677,7 @@ async def get_mop_trends(
             where_clause = query_str[where_idx:groupby_idx]
             
             top_sku_query = text(f"""
-                SELECT brand, capacity, item, SUM(sales_units) as total_units
+                SELECT brand, capacity, item, SUM(sales_units) as total_units, AVG(price) as avg_price
                 FROM marketing_data
                 {where_clause} AND item IS NOT NULL AND item != ''
                 GROUP BY brand, capacity, item
@@ -692,12 +692,14 @@ async def get_mop_trends(
                     continue
                 item = row.item
                 units = int(row.total_units or 0)
+                price = float(row.avg_price or 0.0)
                 
                 if brand not in top_sku_map[bucket]:
                     top_sku_map[bucket][brand] = []
                 top_sku_map[bucket][brand].append({
                     "sku": item,
-                    "volume": units
+                    "volume": units,
+                    "price": round(price, 2)
                 })
                 
             for bucket in capacity_buckets:
@@ -780,6 +782,7 @@ async def get_mop_trends(
                         "rank": index + 1,
                         "top_sku": top_skus_list[0]["sku"] if top_skus_list else None,
                         "top_sku_volume": top_skus_list[0]["volume"] if top_skus_list else 0,
+                        "top_sku_price": top_skus_list[0]["price"] if top_skus_list else 0.0,
                         "top_5_skus": top_skus_list
                     })
                     
