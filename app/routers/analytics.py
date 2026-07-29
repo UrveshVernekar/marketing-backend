@@ -1,3 +1,4 @@
+from math import floor
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from sqlalchemy import text
@@ -19,11 +20,14 @@ def get_capacity_bucket(cap_val):
         val = float(cap_val)
         if val <= 0:
             return None
-        if val >= 14.5:
+        elif val > 14:
             return "> 14 kg"
-        rounded = int(round(val))
-        if 6 <= rounded <= 14:
-            return f"{rounded} kg"
+        elif val < 7:
+            return "6 kg"
+        else:
+            floor_value = int(floor(val))
+            # if 7 <= floor_value <= 14:
+            return f"{floor_value} kg"
         return None
     except ValueError:
         return None
@@ -214,7 +218,8 @@ async def get_capacity_market_share(
     brands: Optional[str] = Query(None),
     duration: str = Query("all"),
     start_period: Optional[str] = Query(None),
-    end_period: Optional[str] = Query(None)
+    end_period: Optional[str] = Query(None),
+    category: str = Query("ALL", description="Category: FL, TL, WDR, or ALL")
 ):
     try:
         with engine.connect() as conn:
@@ -250,6 +255,13 @@ async def get_capacity_market_share(
                     query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
+            
+            if category == "FL":
+                query_str += " AND UPPER(loading) = 'FRONTLOADING'"
+            elif category == "TL":
+                query_str += " AND UPPER(loading) = 'TOPLOADING'"
+            elif category == "WDR":
+                query_str += " AND UPPER(loading) = 'WDR'"
                 
             if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
@@ -279,8 +291,7 @@ async def get_capacity_market_share(
                 except ValueError:
                     pass
                 
-            query_str += " GROUP BY state, city, year, month, brand, capacity"
-            
+            query_str += " GROUP BY state, city, year, month, brand, capacity"            
             result = conn.execute(text(query_str), params).fetchall()
             
             # Buckets configuration
@@ -410,7 +421,9 @@ async def get_sku_standings(
     duration: str = Query("all"),
     sku_type: str = Query("item", description="SKU type: item or capacity"),
     start_period: Optional[str] = Query(None),
-    end_period: Optional[str] = Query(None)
+    end_period: Optional[str] = Query(None),
+    category: str = Query("ALL", description="Category: FL, TL, WDR, or ALL"),
+    capacities: Optional[str] = Query(None, description="Comma-separated capacity buckets")
 ):
     try:
         with engine.connect() as conn:
@@ -425,7 +438,7 @@ async def get_sku_standings(
                 """
             else:
                 query_str = """
-                    SELECT brand, item as sku_val, SUM(sales_units) as total_units, 
+                    SELECT brand, item as sku_val, MAX(capacity) as capacity, SUM(sales_units) as total_units, 
                            SUM(price * sales_units) as total_revenue
                     FROM marketing_data
                     WHERE item IS NOT NULL AND item != ''
@@ -455,6 +468,32 @@ async def get_sku_standings(
                     query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
+            
+            if capacities:
+                cap_list = [c.strip() for c in capacities.split(",") if c.strip()]
+                cap_clauses = []
+                for idx, cap in enumerate(cap_list):
+                    p_cap = f"cap_filter_{idx}"
+                    if cap == "6 kg":
+                        cap_clauses.append("capacity < 7")
+                    elif cap == "> 14 kg":
+                        cap_clauses.append("capacity > 14")
+                    else:
+                        try:
+                            val = int(cap.split()[0])
+                            params[p_cap] = val
+                            cap_clauses.append(f"(capacity >= :{p_cap} AND capacity < :{p_cap} + 1)")
+                        except ValueError:
+                            pass
+                if cap_clauses:
+                    query_str += f" AND ({' OR '.join(cap_clauses)})"
+            
+            if category == "FL":
+                query_str += " AND UPPER(loading) = 'FRONTLOADING'"
+            elif category == "TL":
+                query_str += " AND UPPER(loading) = 'TOPLOADING'"
+            elif category == "WDR":
+                query_str += " AND UPPER(loading) = 'WDR'"
                 
             if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
@@ -523,11 +562,15 @@ async def get_sku_standings(
                         existing["asp"] = round(new_rev / new_vol, 2) if new_vol > 0 else 0.0
                         continue
                         
-                brand_skus[brand].append({
+                item_data = {
                     "sku": sku_name,
                     "volume": volume,
                     "asp": asp
-                })
+                }
+                if sku_type == "item":
+                    cap_val = row.capacity
+                    item_data["capacity"] = f"{float(cap_val):g} kg" if cap_val is not None else None
+                brand_skus[brand].append(item_data)
                 
             # Default sort by volume descending for each brand
             for brand in brand_skus:
@@ -546,7 +589,8 @@ async def get_mop_trends(
     duration: str = Query("all"),
     start_period: Optional[str] = Query(None),
     end_period: Optional[str] = Query(None),
-    rank_by: str = Query("price", description="Rank by: price, volume, or revenue")
+    rank_by: str = Query("price", description="Rank by: price, volume, or revenue"),
+    category: str = Query("ALL", description="Category: FL, TL, WDR, or ALL")
 ):
     try:
         with engine.connect() as conn:
@@ -585,6 +629,13 @@ async def get_mop_trends(
                     query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
+            
+            if category == "FL":
+                query_str += " AND UPPER(loading) = 'FRONTLOADING'"
+            elif category == "TL":
+                query_str += " AND UPPER(loading) = 'TOPLOADING'"
+            elif category == "WDR":
+                query_str += " AND UPPER(loading) = 'WDR'"
                 
             if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3

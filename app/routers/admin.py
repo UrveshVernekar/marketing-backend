@@ -867,6 +867,7 @@ async def export_marketing_data(
     sp_cell: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
     item: Optional[str] = Query(None),
+    loading: Optional[str] = Query(None),
     period: Optional[str] = Query(None),
     state: Optional[str] = Query(None),
     city: Optional[str] = Query(None),
@@ -882,6 +883,7 @@ async def export_marketing_data(
             "sp_cell": sp_cell,
             "brand": brand,
             "item": item,
+            "loading": loading,
             "period": period,
             "state": state,
             "city": city,
@@ -897,15 +899,15 @@ async def export_marketing_data(
         params = {}
         where_clause = build_where_clause(search, filters, params)
         
-        order_clause = "year DESC, month DESC, sp_cell"
+        order_clause = "year DESC, month DESC, sp_cell, marketing_id ASC"
         if sort_by and sort_by in WHITELIST_COLS:
             direction = "DESC" if sort_order == "desc" else "ASC"
             if sort_by == "period":
-                order_clause = f"year {direction}, month {direction}"
+                order_clause = f"year {direction}, month {direction}, marketing_id ASC"
             elif sort_by == "sales_value":
-                order_clause = f"(price * sales_units) {direction}"
+                order_clause = f"(price * sales_units) {direction}, marketing_id ASC"
             else:
-                order_clause = f"{sort_by} {direction}"
+                order_clause = f"{sort_by} {direction}, marketing_id ASC"
                 
         def get_month_name(m):
             months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -917,7 +919,7 @@ async def export_marketing_data(
             output = io.StringIO()
             writer = csv.writer(output)
             writer.writerow([
-                "Channel", "Brand", "Item Model", "Period", "State", "City", 
+                "Channel", "Brand", "Item Model", "Loading", "Period", "State", "City", 
                 "Sales Units", "Sales Value (INR)", "Unit Price (INR)", 
                 "Capacity", "Motor Type", "Steam Function"
             ])
@@ -941,6 +943,7 @@ async def export_marketing_data(
                         ORDER BY {order_clause}
                         LIMIT :limit OFFSET :offset
                     """)
+                    
                     rows = conn.execute(query, batch_params).fetchall()
                     
                 if not rows:
@@ -954,6 +957,7 @@ async def export_marketing_data(
                         r.sp_cell,
                         r.brand or "",
                         r.item or "",
+                        r.loading or "",
                         p_str,
                         r.state or "",
                         r.city or "",
