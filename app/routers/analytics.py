@@ -671,6 +671,40 @@ async def get_mop_trends(
             
             capacity_buckets = ["6 kg", "7 kg", "8 kg", "9 kg", "10 kg", "11 kg", "12 kg", "13 kg", "14 kg", "> 14 kg"]
             
+            # Fetch top SKU per brand and capacity using identical filters
+            where_idx = query_str.find("WHERE")
+            groupby_idx = query_str.find("GROUP BY")
+            where_clause = query_str[where_idx:groupby_idx]
+            
+            top_sku_query = text(f"""
+                SELECT brand, capacity, item, SUM(sales_units) as total_units
+                FROM marketing_data
+                {where_clause} AND item IS NOT NULL AND item != ''
+                GROUP BY brand, capacity, item
+            """)
+            top_sku_rows = conn.execute(top_sku_query, params).fetchall()
+            
+            top_sku_map = {c: {} for c in capacity_buckets}
+            for row in top_sku_rows:
+                brand = row.brand or "Unknown"
+                bucket = get_capacity_bucket(row.capacity)
+                if not bucket:
+                    continue
+                item = row.item
+                units = int(row.total_units or 0)
+                
+                if brand not in top_sku_map[bucket]:
+                    top_sku_map[bucket][brand] = []
+                top_sku_map[bucket][brand].append({
+                    "sku": item,
+                    "volume": units
+                })
+                
+            for bucket in capacity_buckets:
+                for brand in top_sku_map[bucket]:
+                    top_sku_map[bucket][brand].sort(key=lambda x: x["volume"], reverse=True)
+                    top_sku_map[bucket][brand] = top_sku_map[bucket][brand][:5]
+            
             # 1. Aggregate for overall table
             table_data = {c: {} for c in capacity_buckets}
             
@@ -736,13 +770,17 @@ async def get_mop_trends(
                     brand_stats.sort(key=lambda x: x["mop"], reverse=True)
                     
                 for index, stat in enumerate(brand_stats):
+                    top_skus_list = top_sku_map[bucket].get(stat["brand"], [])
                     table_output.append({
                         "brand": stat["brand"],
                         "capacity": bucket,
                         "mop": stat["mop"],
                         "volume": stat["volume"],
                         "revenue": stat["revenue"],
-                        "rank": index + 1
+                        "rank": index + 1,
+                        "top_sku": top_skus_list[0]["sku"] if top_skus_list else None,
+                        "top_sku_volume": top_skus_list[0]["volume"] if top_skus_list else 0,
+                        "top_5_skus": top_skus_list
                     })
                     
             # Sort chronological trend
