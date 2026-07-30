@@ -225,18 +225,14 @@ async def get_capacity_market_share(
         with engine.connect() as conn:
             max_period_res = conn.execute(text("SELECT MAX(year * 12 + month) FROM marketing_data")).scalar()
             
-            query_str = """
-                SELECT state, city, year, month, brand, capacity, SUM(sales_units) as total_units
-                FROM marketing_data
-                WHERE 1=1
-            """
+            filter_clauses = []
             params = {}
             
             if brands:
                 brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
                 if brand_list:
                     placeholders = [f":brand_{i}" for i in range(len(brand_list))]
-                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
+                    filter_clauses.append(f"UPPER(brand) IN ({','.join(placeholders)})")
                     for i, val in enumerate(brand_list):
                         params[f"brand_{i}"] = val
                         
@@ -244,7 +240,7 @@ async def get_capacity_market_share(
                 state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
                 if state_list:
                     placeholders = [f":state_{i}" for i in range(len(state_list))]
-                    query_str += f" AND UPPER(state) IN ({','.join(placeholders)})"
+                    filter_clauses.append(f"UPPER(state) IN ({','.join(placeholders)})")
                     for i, val in enumerate(state_list):
                         params[f"state_{i}"] = val
                         
@@ -252,16 +248,16 @@ async def get_capacity_market_share(
                 city_list = [c.strip().upper() for c in cities.split(",") if c.strip()]
                 if city_list:
                     placeholders = [f":city_{i}" for i in range(len(city_list))]
-                    query_str += f" AND UPPER(city) IN ({','.join(placeholders)})"
+                    filter_clauses.append(f"UPPER(city) IN ({','.join(placeholders)})")
                     for i, val in enumerate(city_list):
                         params[f"city_{i}"] = val
             
             if category == "FL":
-                query_str += " AND UPPER(loading) = 'FRONTLOADING'"
+                filter_clauses.append("UPPER(loading) = 'FRONTLOADING'")
             elif category == "TL":
-                query_str += " AND UPPER(loading) = 'TOPLOADING'"
+                filter_clauses.append("UPPER(loading) = 'TOPLOADING'")
             elif category == "WDR":
-                query_str += " AND UPPER(loading) = 'WDR'"
+                filter_clauses.append("UPPER(loading) = 'WDR'")
                 
             if duration != "all" and duration != "custom" and max_period_res is not None:
                 months_back = 3
@@ -273,29 +269,55 @@ async def get_capacity_market_share(
                     months_back = 12
                 
                 min_period = max_period_res - months_back + 1
-                query_str += " AND (year * 12 + month) >= :min_period"
+                filter_clauses.append("(year * 12 + month) >= :min_period")
                 params["min_period"] = min_period
                 
             if start_period:
                 try:
                     sy, sm = map(int, start_period.split("-"))
-                    query_str += " AND (year * 12 + month) >= :start_period_val"
+                    filter_clauses.append("(year * 12 + month) >= :start_period_val")
                     params["start_period_val"] = sy * 12 + sm
                 except ValueError:
                     pass
             if end_period:
                 try:
                     ey, em = map(int, end_period.split("-"))
-                    query_str += " AND (year * 12 + month) <= :end_period_val"
+                    filter_clauses.append("(year * 12 + month) <= :end_period_val")
                     params["end_period_val"] = ey * 12 + em
                 except ValueError:
                     pass
                 
-            query_str += " GROUP BY state, city, year, month, brand, capacity"            
+            where_clause = ""
+            if filter_clauses:
+                where_clause = " WHERE " + " AND ".join(filter_clauses)
+                
+            query_str = f"""
+                SELECT state, city, year, month, brand, capacity, SUM(sales_units) as total_units
+                FROM marketing_data
+                {where_clause}
+                GROUP BY state, city, year, month, brand, capacity
+            """            
             result = conn.execute(text(query_str), params).fetchall()
             
             # Buckets configuration
             capacity_buckets = ["6 kg", "7 kg", "8 kg", "9 kg", "10 kg", "11 kg", "12 kg", "13 kg", "14 kg", "> 14 kg"]
+
+            # Query for model/SKU counts per brand and capacity bucket
+            sku_count_query = f"""
+                SELECT brand, capacity, COUNT(DISTINCT item) as model_count
+                FROM marketing_data
+                {where_clause} {"AND" if where_clause else "WHERE"} item IS NOT NULL AND item != ''
+                GROUP BY brand, capacity
+            """
+            sku_count_rows = conn.execute(text(sku_count_query), params).fetchall()
+            
+            sku_counts = {c: {} for c in capacity_buckets}
+            for row in sku_count_rows:
+                brand = row.brand or "Unknown"
+                bucket = get_capacity_bucket(row.capacity)
+                if not bucket:
+                    continue
+                sku_counts[bucket][brand] = int(row.model_count or 0)
             
             # 1. Aggregate for grid: brand vs capacity
             brand_capacity_units = {}
@@ -340,16 +362,19 @@ async def get_capacity_market_share(
             for brand, buckets in brand_capacity_units.items():
                 brand_shares = {}
                 brand_units = {}
+                brand_sku_counts = {}
                 for bucket in capacity_buckets:
                     units = buckets[bucket]
                     total = capacity_totals[bucket]
                     brand_units[bucket] = units
                     brand_shares[bucket] = round((units / total * 100), 2) if total > 0 else 0.0
+                    brand_sku_counts[bucket] = sku_counts[bucket].get(brand, 0)
                     
                 grid_output.append({
                     "brand": brand,
                     "units": brand_units,
-                    "shares": brand_shares
+                    "shares": brand_shares,
+                    "sku_counts": brand_sku_counts
                 })
                 
             # Formatting trend output (sorted chronologically)
