@@ -91,13 +91,7 @@ async def get_branch_market_share(
                 "max_period": max_period_key
             }
             
-            if brands:
-                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
-                if brand_list:
-                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
-                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
-                    for i, val in enumerate(brand_list):
-                        params[f"brand_{i}"] = val
+            # Brand selection is handled in Python post-aggregation to show correct market share relative to all brands.
             
             if states:
                 state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
@@ -179,6 +173,8 @@ async def get_branch_market_share(
                         
             # Compute market shares and deltas
             output = []
+            selected_brands_set = {b.strip().upper() for b in brands.split(",") if b.strip()} if brands else None
+            
             for state_name, brands_dict in state_data.items():
                 total_state_units = sum(brands_dict.values())
                 
@@ -186,6 +182,11 @@ async def get_branch_market_share(
                 brand_units = {}
                 brand_trends = {}
                 for brand, units in brands_dict.items():
+                    # If brand filter is active, only include selected brands in the output:
+                    brand_upper = brand.upper()
+                    if selected_brands_set is not None and brand_upper not in selected_brands_set:
+                        continue
+                        
                     brand_units[brand] = units
                     curr_share = (units / total_state_units * 100) if total_state_units > 0 else 0.0
                     brand_shares[brand] = round(curr_share, 2)
@@ -228,13 +229,7 @@ async def get_capacity_market_share(
             filter_clauses = []
             params = {}
             
-            if brands:
-                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
-                if brand_list:
-                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
-                    filter_clauses.append(f"UPPER(brand) IN ({','.join(placeholders)})")
-                    for i, val in enumerate(brand_list):
-                        params[f"brand_{i}"] = val
+            # Brand selection is handled in Python post-aggregation to show correct market share relative to all brands.
                         
             if states:
                 state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
@@ -359,7 +354,12 @@ async def get_capacity_market_share(
                 
             # Formatting grid output
             grid_output = []
+            selected_brands_set = {b.strip().upper() for b in brands.split(",") if b.strip()} if brands else None
+            
             for brand, buckets in brand_capacity_units.items():
+                if selected_brands_set is not None and brand.upper() not in selected_brands_set:
+                    continue
+                    
                 brand_shares = {}
                 brand_units = {}
                 brand_sku_counts = {}
@@ -390,6 +390,9 @@ async def get_capacity_market_share(
                     
                     formatted_cap_data[bucket] = {}
                     for brand, units in brand_units_map.items():
+                        if selected_brands_set is not None and brand.upper() not in selected_brands_set:
+                            continue
+                            
                         formatted_cap_data[bucket][brand] = {
                             "units": units,
                             "share": round((units / total_cap_units * 100), 2) if total_cap_units > 0 else 0.0
@@ -631,13 +634,7 @@ async def get_mop_trends(
             """
             params = {}
             
-            if brands:
-                brand_list = [b.strip().upper() for b in brands.split(",") if b.strip()]
-                if brand_list:
-                    placeholders = [f":brand_{i}" for i in range(len(brand_list))]
-                    query_str += f" AND UPPER(brand) IN ({','.join(placeholders)})"
-                    for i, val in enumerate(brand_list):
-                        params[f"brand_{i}"] = val
+            # Brand selection is handled in the frontend to compute correct market share and ranks relative to all brands.
                         
             if states:
                 state_list = [s.strip().upper() for s in states.split(",") if s.strip()]
