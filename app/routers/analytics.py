@@ -702,6 +702,11 @@ async def get_mop_trends(
                     "price": round(price, 2)
                 })
                 
+            sku_counts = {c: {} for c in capacity_buckets}
+            for bucket in capacity_buckets:
+                for brand, skus in top_sku_map[bucket].items():
+                    sku_counts[bucket][brand] = len(skus)
+
             for bucket in capacity_buckets:
                 for brand in top_sku_map[bucket]:
                     top_sku_map[bucket][brand].sort(key=lambda x: x["volume"], reverse=True)
@@ -783,7 +788,8 @@ async def get_mop_trends(
                         "top_sku": top_skus_list[0]["sku"] if top_skus_list else None,
                         "top_sku_volume": top_skus_list[0]["volume"] if top_skus_list else 0,
                         "top_sku_price": top_skus_list[0]["price"] if top_skus_list else 0.0,
-                        "top_5_skus": top_skus_list
+                        "top_5_skus": top_skus_list,
+                        "sku_count": sku_counts[bucket].get(stat["brand"], 0)
                     })
                     
             # Sort chronological trend
